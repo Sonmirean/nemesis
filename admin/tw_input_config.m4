@@ -1,0 +1,125 @@
+m4_define([TW_OPTIONS], [
+
+dnl dlopen() and friends
+AC_ARG_ENABLE(-dlopen,dnl
+[  --enable--dlopen[=yes|no]              use dlopen() to load modules instead of libtool lt_dlopen()],,
+enable__dlopen=yes
+)dnl
+
+dnl compile static twin server
+AC_ARG_ENABLE(server-static,dnl
+[  --enable-server-static[=yes|no]        also compile static twin server [[default=no]]],,
+enable_server_static=no
+)dnl
+
+dnl socket server
+AC_ARG_ENABLE(socket,dnl
+[  --enable-socket[=yes|no]               enable remote socket connections (libtw) ],,
+enable_socket=yes
+)dnl
+
+dnl socket compression
+AC_ARG_ENABLE(socket_gz,dnl
+[  --enable-socket-gz[=yes|no]            enable gzip compression on sockets ],,
+enable_socket_gz=yes
+)dnl
+
+dnl thread safe libtw
+AC_ARG_ENABLE(socket_pthreads,dnl
+[  --enable-socket-pthreads[=yes|no]      enable thread safe libraries (requires pthread) ],,
+enable_socket_pthreads=yes
+)dnl
+
+dnl support alien architectures
+AC_ARG_ENABLE(socket_alien,dnl
+[  --enable-socket-alien[=yes|no]         enable support for non-native architectures ],,
+enable_socket_alien=yes
+)dnl
+
+dnl twinrc parser
+AC_ARG_ENABLE(rcparse,dnl
+[  --enable-rcparse[=yes|no]              enable ~/.config/twin/twinrc configuration parser ],,
+enable_rcparse=yes
+)dnl
+
+dnl use mmapped shared file for parser
+AC_ARG_ENABLE(rcparse_shmmap,dnl
+[  --enable-rcparse-shmmap[=yes|no]       enable mmapped shared file for parser ],,
+enable_rcparse_shmmap=yes
+)dnl
+
+dnl shrink memory when parser finishes
+AC_ARG_ENABLE(rcparse_shrink,dnl
+[  --enable-rcparse-shrink[=yes|no]       shrink memory when parser finishes ],,
+enable_rcparse_shrink=yes
+)dnl
+
+dnl use /dev/pts/* for terminal emulator
+AC_ARG_ENABLE(term_devpts,dnl
+[  --enable-term-devpts[=yes|no]          enable Unix98 /dev/pts/* pseudo-ttys ],,
+enable_term_devpts=yes
+)dnl
+
+dnl store server messages in "Messages" window
+AC_ARG_ENABLE(printk,dnl
+[  --enable-printk[=yes|no]               enable logging messages in Messages window ],,
+enable_printk=yes
+)dnl
+
+dnl tty drivers
+AC_ARG_ENABLE(hw-tty,dnl
+[  --enable-hw-tty[=yes|no]               enable tty drivers ],,
+enable_hw_tty=yes
+)dnl
+
+dnl the Linux console driver
+AC_ARG_ENABLE(hw-tty-linux,dnl
+[  --enable-hw-tty-linux[=yes|no]         enable the Linux console driver with gpm mouse],,
+enable_hw_tty_linux=yes
+)dnl
+
+dnl the Linux console raw keyboard driver
+AC_ARG_ENABLE(hw-tty-lrawkbd,dnl
+[  --enable-hw-tty-lrawkbd[=yes|no]       enable the Linux console raw keyboard driver],,
+enable_hw_tty_lrawkbd=yes
+)dnl
+
+dnl the termcap terminal driver
+AC_ARG_ENABLE(hw-tty-termcap,dnl
+[  --enable-hw-tty-termcap[=yes|no]       enable the termcap/ncurses terminal driver ],,
+enable_hw_tty_termcap=yes
+)dnl
+
+dnl the X11 driver
+AC_ARG_ENABLE(hw-x11,dnl
+[  --enable-hw-x11[=yes|no]               enable the X11 driver ],,
+enable_hw_x11=yes
+)dnl
+
+dnl the xft driver
+AC_ARG_ENABLE(hw-xft,dnl
+[  --enable-hw-xft[=yes|no]               enable the xft (X11 with truetype fonts) driver ],,
+enable_hw_xft=yes
+)dnl
+
+dnl the twin driver
+AC_ARG_ENABLE(hw-twin,dnl
+[  --enable-hw-twin[=yes|no]              enable the twin nested driver ],,
+enable_hw_twin=yes
+)dnl
+
+dnl the twdisplay driver
+AC_ARG_ENABLE(hw-display,dnl
+[  --enable-hw-display[=yes|no]           enable the twdisplay client driver ],,
+enable_hw_display=yes
+)dnl
+
+enable_opt_shadows=yes
+enable_opt_blink=no
+enable_opt_cursor_always=no
+enable_opt_menu_hide=no
+enable_opt_menu_info=no
+enable_opt_menu_relax=yes
+enable_opt_screen_scroll=no
+
+])

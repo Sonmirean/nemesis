@@ -1,0 +1,180 @@
+# Nemesis (fork of Twin) — project rules
+
+Read this before editing. Lessons here came out of real audits and the
+nemesis-specific work that's already landed.
+
+## What this is
+
+Nemesis is a fork of [twin](https://github.com/cosmos72/twin) — a textmode
+windowing environment in C++. The fork's active workstream is the **WM
+side-channel socket** (`server/wmsock.{cpp,h}`): a parallel `AF_UNIX`
+listener that mirrors window events as line-framed JSON so an external
+window manager can observe the built-in WM. See `README.md` for the
+project overview and the in-tree run recipe.
+
+Roadmap shorthand used in source comments:
+- **Phase 4A — observer-only (landed)**: built-in WM authoritative,
+  external WM receives `map` events only.
+- **Phase 4B — event coverage (in progress)**: `unmap`, `mouse`, `key`
+  events mirrored through `SendMsgToWM(Tmsg msg)` dispatcher.
+- **Phase 4C–4F (planned)**: focus/move/resize/raise/close events, then
+  inbound commands.
+
+Nemesis-specific commits are prefixed `nemesis:`. Upstream commits land
+on top via merge; do not rewrite upstream history.
+
+## Build, run, verify
+
+- `./configure && make -j`. Build must complete with no new warnings;
+  the codebase is `.clang-format`-clean — respect it.
+- In-tree run (no install): use the staging recipe in `README.md`
+  (`/tmp/twin-plugins` symlink farm + `--plugindir=`).
+- Verify the side-channel after a code change to `wmsock` or `util`:
+  - `ls -l /tmp/.Twin:0-wm` while server is up → `srw-------` (0600).
+  - `socat - UNIX-CONNECT:/tmp/.Twin:0-wm` in a second terminal,
+    then open any twin client (e.g. `./clients/twclock`); a JSON line
+    `{"type":"map",…}` must appear.
+  - `kill <pid>` the server cleanly; `ls /tmp/.Twin:0-wm` must report
+    no such file. That proves `WMSockShutdown` ran via `QuitTWDisplay`.
+
+## Architecture invariants — do not silently break these
+
+1. **Built-in WM stays authoritative.** The external WM is observer-only
+   in phase 4A. Mirror calls must come *after* `SendMsg(Ext(WM, MsgPort), msg)`,
+   never before, never instead of.
+2. **The mirror is best-effort.** A slow or absent external WM must
+   never block the server. `EAGAIN` on the write path drops the message
+   (phase 4A); phase 4F will add `RemoteWriteQueue`/`RemoteFlush`.
+3. **`InitWM` loads `SocketSo` unconditionally** (`server/wm.cpp`).
+   This is a nemesis policy change vs upstream so external clients
+   (`twclutter`, `twterm`, `twattach`) can attach regardless of `--hw=…`.
+   Don't gate it back on `--nohw`.
+4. **State location for the WM side-channel:** lifecycle bookkeeping
+   (`wmListenSlot`, `wmConnSlot`, `wmAddr`, `wmPathBound`) is file-static
+   in `wmsock.cpp`; the public fds (`WMListenFd`, `WMConnFd`) live in
+   `Ext(WM, …)` (`extreg.h`). This split is intentional — keep it.
+
+## Signal model
+
+`InitSignals` (`server/hw.cpp:205-217`) installs `SIG_IGN` for every
+signal in `signals_ignore[]`, **including `SIGPIPE`** (`hw.cpp:155`).
+That handler stays in place for the life of the process.
+
+- **Do not save/restore `SIGPIPE` per write call.** It's redundant and
+  fragile. `write()` already returns `-1`/`EPIPE` because the global
+  handler is `SIG_IGN`.
+- Same rule for any new write path you add — trust the global handler;
+  inspect `errno` on the return value.
+
+## Unix-socket bootstrap pattern
+
+Canonical sequence (see `util.cpp:1191-1296` for the libtw listener,
+`wmsock.cpp` for the WM side-channel):
+
+```
+socket(AF_UNIX, SOCK_STREAM, 0)
+  → build path with CopyToSockaddrUn (chain returns running pos)
+  → CHECK: pos < sizeof(sun_path) - 1   ← path is silently truncated otherwise
+  → probe connect; on failure unlink; on success refuse to bind
+  → bind
+  → chmod (0600 for WM side-channel; 0700 for libtw)
+  → listen (backlog = WMSOCK_LISTEN_BACKLOG for WM; 3 for libtw)
+  → fcntl FD_CLOEXEC (and O_NONBLOCK on the WM listen fd)
+  → RegisterRemoteFd
+```
+
+**Every listener path bound during init must be `unlink`ed in
+`QuitTWDisplay`** (or chained from it). `QuitTWDisplay` already calls
+`WMSockShutdown()`; if you add another listener, add it the same way.
+
+## Auth & trust
+
+The WM side-channel has **no TwinAuth**. The trust model:
+
+- Socket file mode `0600` + kernel UID check on `connect(2)` = only the
+  server's own uid can attach. `TmpDir` is typically `/tmp` (mode 1777,
+  world-writable but sticky); directory mode is *not* the gate.
+- Same trust model as Twin's main libtw socket. Document the mode (0600)
+  and the UID check, not the parent directory.
+
+The `~/.TwinAuth` file is for the libtw socket only. Its creation is
+TOCTOU-safe via `O_EXCL` + `fchmod(fd, …)` (`server/socket.cpp:1950+`,
+upstream PR #86). Don't regress that to `chmod(path, …)`.
+
+## Wire format
+
+Line-framed JSON, one event per line, no embedded newlines. Buffer
+sizes use named constants at the top of `wmsock.cpp`
+(`WMSOCK_JSON_LINE_BUFSZ`, `WMSOCK_READ_BUFSZ`). If a message would
+exceed the buffer, the truncation case **must log a warning** — silent
+drops are debuggable only post-mortem.
+
+## Event-mirror sites
+
+All `SendMsg(Ext(WM, MsgPort), msg)` callsites that need WM-side mirroring
+go through `SendMsgToWM(Tmsg msg)` (`server/wmsock.cpp`). It dispatches to
+the built-in WM first (invariant 1), then mirrors by `msg->Type`. Today
+that covers `msg_map`, `msg_mouse`, `msg_key`. When you add a new mirrored
+msg type, extend the switch in `SendMsgToWM` and add a file-static
+`wmSend<Type>` formatter alongside the existing ones.
+
+Exception: `Swidget::UnMap` synthesizes an `unmap` mirror via
+`WMSockSendUnmap` directly — there is no `msg_unmap` for the dispatcher to
+hand off. Map and unmap mirror calls are paired in `obj/widget.cpp`; keep
+them in lock-step.
+
+The mouse merge-coalesce path in `StdAddMouseEvent`
+(`server/hw_multi.cpp:1122-1128`) mutates the tail-queued msg without
+calling `SendMsg`, so it does not reach `SendMsgToWM` and does not
+mirror. Effect: when MOVE events arrive faster than the built-in WM
+drains its queue, only the first MOVE in each burst mirrors to the
+external WM; intermediate positions are folded into the queued msg and
+visible only to the built-in WM. Acceptable for observer semantics;
+revisit if smooth external tracking is required.
+
+## Code style — what Twin does
+
+Adapt to the existing house style, don't impose new conventions:
+
+- **Functions**: `PascalCase` for exported (`WMSockInit`, `InitTWDisplay`),
+  `camelCase` for file-static helpers (`wmCloseConn`, `wmConnRead`).
+- **Logging**:
+  `log(WARNING) << "twin: <subsystem>: " << ... << Chars::from_c(strerror(errno)) << "\n";`
+- **Types**: use Twin's typedefs (`uldat`, `udat`, `dat`, `tcell`,
+  `tcolor`, `byte`, `bool`), not `int32_t`/`stdint`. They have
+  cross-platform semantics Twin depends on.
+- **Resource cleanup**: `goto cleanup;` is idiomatic in
+  `server/socket.cpp` (e.g. `CreateAuth`). Don't refactor it away to
+  `try/finally`-style RAII just because it's C-flavored.
+- **Magic numbers**: prefer a `#define` at the top of the file. Refer
+  to `wmsock.cpp` for the layout (`WMSOCK_READ_BUFSZ` etc.).
+- **Phase markers**: forward-looking `Phase 4F` comments at use sites
+  are fine if they're short and concrete. Avoid roadmap blocks in
+  source — those belong in `../decisions/` or issue trackers.
+
+## Caveats observed in the codebase
+
+These are real surprises a future editor will hit. Pre-empt them:
+
+1. **`CopyToSockaddrUn` silently truncates** when `pos >= sun_path - 1`
+   (`util.cpp:1171-1180`). Any chain of calls must check the final pos.
+2. **Chained `chmod && listen && fcntl`** clobbers `errno` between
+   calls (`util.cpp:1243-1244`, `wmsock.cpp:175-178`). The current code
+   logs a generic "chmod/listen/fcntl" message. When you add new
+   failure paths, split the chain for diagnostic clarity.
+3. **`extreg.h` is a function-pointer swap registry**, but the WM
+   fields (`WMListenFd`, `WMConnFd`) are raw `int`. That's fine for
+   module-local fds; don't extend the pattern to other modules without
+   thinking through whether you actually need swap-in semantics.
+4. **Stale-socket cleanup logic in `wmsock.cpp` treats all `connect()`
+   errors as stale.** It's correct for `ECONNREFUSED` (no listener) but
+   would unlink a path even on `EACCES`. Acceptable today (single-user
+   tree); revisit if multi-user trust ever matters.
+
+## When in doubt
+
+- For library/API questions, prefer `context7` MCP over web search.
+- For irreversible changes (force-push, history rewrite, deletion of
+  files outside the build tree), confirm with the user first.
+- Verify changes end-to-end: build, in-tree run, probe the side-channel
+  with `socat`. Don't claim "done" on type-check alone.

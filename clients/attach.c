@@ -1,0 +1,367 @@
+/*
+ *  attach.c  --  connect to a running twin and tell it to attach/detach
+ *                from a given display
+ *
+ *  Copyright (C) 2000 by Massimiliano Ghilardi
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <signal.h>
+
+#include <Tw/Tw.h>
+#include <Tw/Twerrno.h>
+#include "version.h"
+
+static char *MYname;
+
+static void Usage(byte detach) {
+  fprintf(stderr,
+          "Usage: %s [OPTIONS] %s\n"
+          "Currently known options: \n"
+          "  -h, --help               display this help and exit\n"
+          "  -V, --version            output version information and exit\n"
+          "  -a                       attach display%s\n"
+          "  -d                       detach display%s\n"
+          "  -s, --share              allow multiple simultaneous displays (default)\n"
+          "  -x, --excl               request exclusive display: detach all others\n"
+          "  -v, --verbose            verbose output (default)\n"
+          "  -q, --quiet              quiet: don't report messages from twin server\n"
+          "  -f, --force              force running even with wrong protocol version\n"
+          "  --twin@<TWDISPLAY>       specify server to contact (default is $TWDISPLAY)\n"
+          "  --hw=<display>[,options] start the given display driver\n"
+          "Currently known display drivers: \n"
+          "\txft[@<XDISPLAY>]\n"
+          "\tx11[@<XDISPLAY>]\n"
+          "\ttty[@<tty device>]\n"
+          "\ttwin[@<TWDISPLAY>]\n",
+          MYname, detach ? "" : "--hw=<display> [...]", detach ? "" : " (default)",
+          detach ? " (default)" : "");
+}
+
+static TW_VOLATILE byte gotSignals, gotSignalWinch, gotSignalPanic;
+
+static void SignalWinch(int n) {
+  (void)n;
+  signal(SIGWINCH, SignalWinch);
+  gotSignals = gotSignalWinch = ttrue;
+}
+
+static void SignalPanic(int n) {
+  signal(n, SIG_IGN);
+  gotSignals = gotSignalPanic = ttrue;
+}
+
+static void ShowVersion(void) {
+  printf("%s " TWIN_VERSION_STR " with socket protocol " TW_PROTOCOL_VERSION_STR "\n", MYname);
+}
+
+static byte VersionsMatch(byte force) {
+  uldat cv = TW_PROTOCOL_VERSION, lv = TwLibraryVersion(), sv = TwServerVersion();
+
+  if (lv != sv || lv != cv) {
+    fprintf(stderr,
+            "%s: %s: socket protocol version mismatch!%s\n"
+            "          client is %u.%u.%u, library is %u.%u.%u, server is %u.%u.%u\n",
+            MYname, (force ? "warning" : "fatal"), (force ? " (ignored)" : ""),
+            (unsigned)TW_VER_MAJOR(cv), (unsigned)TW_VER_MINOR(cv), (unsigned)TW_VER_PATCH(cv),
+            (unsigned)TW_VER_MAJOR(lv), (unsigned)TW_VER_MINOR(lv), (unsigned)TW_VER_PATCH(lv),
+            (unsigned)TW_VER_MAJOR(sv), (unsigned)TW_VER_MINOR(sv), (unsigned)TW_VER_PATCH(sv));
+    return tfalse;
+  }
+  return ttrue;
+}
+
+static void InitSignals(void) {
+  signal(SIGWINCH, SignalWinch);
+  signal(SIGCHLD, SIG_IGN);
+  signal(SIGPIPE, SIG_IGN);
+  signal(SIGIO, SIG_IGN);
+#ifndef TW_DONT_TRAP_SIGNALS
+  signal(SIGHUP, SignalPanic);
+  signal(SIGINT, SignalPanic);
+  signal(SIGQUIT, SignalPanic);
+  signal(SIGILL, SignalPanic);
+  signal(SIGABRT, SignalPanic);
+  signal(SIGBUS, SignalPanic);
+  signal(SIGFPE, SignalPanic);
+  signal(SIGSEGV, SignalPanic);
+  signal(SIGTERM, SignalPanic);
+  signal(SIGXCPU, SignalPanic);
+  signal(SIGXFSZ, SignalPanic);
+#ifdef SIGPWR
+  signal(SIGPWR, SignalPanic);
+#endif
+#endif
+}
+
+static char *fix_tty(char *arg, byte is_our_tty[1], byte err[1]) {
+  char *target = NULL;
+  char *opts = arg + 7;
+  char *comma = strchr(opts, ',');
+  const char *rest;
+  const char *tty = ttyname(0);
+  byte is_srv_tty = 0;
+  if (!tty) {
+    fprintf(stderr, "%s: ttyname() failed, cannot find controlling tty!\n", MYname);
+    *err = 1;
+    return NULL;
+  }
+  if (comma) {
+    *comma = '\0';
+  }
+
+  if (!opts[0]) {
+    *is_our_tty = 1; /* attach twin to our tty */
+  } else if (opts[0] == '@' && opts[1]) {
+    if (opts[1] == '-') {
+      is_srv_tty = 1; /* tell twin to attach to its own tty */
+    } else if (!strcmp(opts + 1, tty)) {
+      *is_our_tty = 1; /* attach twin to our tty */
+    }
+  } else {
+    fprintf(stderr, "%s: malformed display hw `%s'\n", MYname, arg);
+    *err = 1;
+    return NULL;
+  }
+
+  if (comma) {
+    *comma = ',';
+    rest = comma;
+  } else {
+    rest = "";
+  }
+
+  if (*is_our_tty) {
+    const char *term = getenv("TERM");
+    if (!term) {
+      term = "";
+    }
+    size_t target_len = strlen(tty) + 9 + strlen(rest) + (*term ? 6 + strlen(term) : 0);
+    target = (char *)malloc(target_len);
+    if (target) {
+      snprintf(target, target_len, "-hw=tty@%s%s%s%s", tty, (*term ? ",TERM=" : ""), term, rest);
+    }
+  } else if (is_srv_tty) {
+    size_t target_len = 8 + strlen(rest);
+    target = malloc(target_len);
+    if (target) {
+      snprintf(target, target_len, "-hw=tty%s", rest);
+    }
+  } else {
+    target = strdup(arg);
+  }
+  if (!target) {
+    fprintf(stderr, "%s: out of memory!\n", MYname);
+    *err = 1;
+  }
+  return target;
+}
+
+static char *fix_x11(char *arg) {
+  const char *our_xdisplay = NULL;
+  char *target = NULL;
+  char *opts = NULL;
+
+  if (!strncmp(arg, "-hw=xft", 7) || !strncmp(arg, "-hw=X11", 7) || !strncmp(arg, "-hw=x11", 7)) {
+    opts = arg + 7;
+  } else /* if (!strncmp(arg, "-hw=X", 5) || !strncmp(arg, "-hw=x", 5)) */ {
+    opts = arg + 5;
+  }
+
+  if (!opts[0] || opts[0] != '@') {
+    our_xdisplay = getenv("DISPLAY"); /* attach twin to our $DISPLAY */
+    if (!our_xdisplay) {
+      fprintf(stderr,
+              "%s: warning: %.*s option @<XDISPLAY> not specified,"
+              " and environment variable $DISPLAY is not set."
+              "\n    using twin server's environment variable $DISPLAY",
+              MYname, (int)(opts - arg), arg);
+    }
+  }
+
+  if (our_xdisplay) {
+    size_t target_len = strlen(arg) + 2 + strlen(our_xdisplay);
+    target = (char *)malloc(target_len);
+    if (target) {
+      snprintf(target, target_len, "%.*s@%s%s", (int)(opts - arg), arg, our_xdisplay, opts);
+    }
+  } else {
+    target = strdup(arg);
+  }
+  if (!target) {
+    fprintf(stderr, "%s: out of memory!\n", MYname);
+  }
+  return target;
+}
+
+TW_DECL_MAGIC(attach_magic);
+
+int main(int argc, char *argv[]) {
+  char *dpy = NULL, *target = NULL, *arg;
+  uldat chunk;
+  byte detach = 0, redirect, force = 0, flags = TW_ATTACH_HW_REDIRECT;
+  byte is_our_tty = 0;
+
+  TwMergeHyphensArgv(argc, argv);
+
+  MYname = argv[0];
+
+  if (strstr(argv[0], "detach")) {
+    detach = 1;
+  }
+
+  while ((arg = *++argv) != NULL) {
+    if (!strcmp(arg, "-V") || !strcmp(arg, "-version")) {
+      ShowVersion();
+      return 0;
+    } else if (!strcmp(arg, "-h") || !strcmp(arg, "-help")) {
+      Usage(detach);
+      return 0;
+    } else if (!strcmp(arg, "-x") || !strcmp(arg, "-excl")) {
+      flags |= TW_ATTACH_HW_EXCLUSIVE;
+    } else if (!strcmp(arg, "-s") || !strcmp(arg, "-share")) {
+      flags &= ~TW_ATTACH_HW_EXCLUSIVE;
+    } else if (!strcmp(arg, "-a")) {
+      detach = 0;
+    } else if (!strcmp(arg, "-d")) {
+      detach = 1;
+    } else if (!strcmp(arg, "-v") || !strcmp(arg, "-verbose")) {
+      flags |= TW_ATTACH_HW_REDIRECT;
+    } else if (!strcmp(arg, "-q") || !strcmp(arg, "-quiet")) {
+      flags &= ~TW_ATTACH_HW_REDIRECT;
+    } else if (!strcmp(arg, "-f") || !strcmp(arg, "-force")) {
+      force = 1;
+    } else if (!strncmp(arg, "-twin@", 6)) {
+      dpy = arg + 6;
+    } else if (!strncmp(arg, "-hw=", 4)) {
+      if (target) {
+        fprintf(stderr, "%s: only a single --hw=... argument is supported\n", MYname);
+        return 1;
+      } else if (!strncmp(arg + 4, "tty", 3)) {
+        byte err = 0;
+        target = fix_tty(arg, &is_our_tty, &err);
+        if (err != 0 || !target) {
+          return 1;
+        }
+      } else if (arg[4] == 'X' || arg[4] == 'x') {
+        target = fix_x11(arg);
+        if (!target) {
+          return 1;
+        }
+      } else if (arg[4]) {
+        target = strdup(arg);
+        if (!target) {
+          fprintf(stderr, "%s: out of memory!\n", MYname);
+          return 1;
+        }
+      } else {
+        Usage(detach);
+        return 1;
+      }
+    } else {
+      fprintf(stderr,
+              "%s: argument `%s' not recognized\n"
+              "\ttry `%s --help' for usage summary.\n",
+              MYname, arg, MYname);
+      return 1;
+    }
+  }
+
+  if (detach == 0 && !target) {
+    Usage(detach);
+    return 1;
+  }
+
+  redirect = flags & TW_ATTACH_HW_REDIRECT;
+
+  InitSignals();
+
+  if (TwCheckMagic(attach_magic) && TwOpen(dpy) && TwCreateMsgPort(8, "twattach"))
+    do {
+      byte ret = 0;
+
+      if (!VersionsMatch(force)) {
+        if (!force) {
+          fprintf(stderr, "%s: Aborting. Use option `--force' to ignore versions check.\n", MYname);
+          TwClose();
+          return 1;
+        }
+      }
+
+      if (detach) {
+        return !TwDetachHW(target ? strlen(target) : 0, target);
+      }
+
+      TwAttachHW(target ? strlen(target) : 0, target, flags);
+      TwFlush();
+      free(target);
+
+      if (redirect)
+        fprintf(stderr, "reported messages...\n");
+
+      for (;;) {
+        const char *reply = TwAttachGetReply(&chunk);
+        if (reply <= (char *)2) {
+          ret = (byte)(size_t)reply;
+          break;
+        } else if (reply == (char *)-1) {
+          break; /* libtw panic */
+        }
+
+        fprintf(stderr, "%.*s", (int)chunk, reply);
+      }
+      fflush(stderr);
+
+      if (TwInPanic())
+        break;
+
+      if (is_our_tty) {
+        fputs("\033[2J", stdout);
+        fflush(stdout);
+      }
+
+      /*
+       * twin waits this before grabbing the display...
+       * so we can fflush(stdout) to show all messages
+       * *BEFORE* twin draws on (eventually) the same tty
+       */
+      TwAttachConfirm();
+
+      if (ret == 2) {
+        /*
+         * twin told us to stay and sit on the display
+         * until it is quitted.
+         */
+        int fd = TwConnectionFd();
+        fd_set fds;
+        FD_ZERO(&fds);
+
+        while (!gotSignalPanic && !TwInPanic()) {
+          while (TwReadMsg(tfalse))
+            ;
+          FD_SET(fd, &fds);
+          select(fd + 1, &fds, NULL, NULL, NULL);
+          if (gotSignalWinch)
+            TwNeedResizeDisplay(), TwFlush(), gotSignalWinch = tfalse;
+        }
+      } else if (redirect) {
+        if (ret)
+          fprintf(stderr, "... ok, twin successfully attached.\n");
+        else
+          fprintf(stderr, "... ach, twin failed to attach.\n");
+      }
+      return !ret;
+    } while (0);
+
+  chunk = TwErrno;
+  fprintf(stderr, "%s: libtw error: %s%s\n", MYname, TwStrError(chunk),
+          TwStrErrorDetail(chunk, TwErrnoDetail));
+  return 1;
+}
