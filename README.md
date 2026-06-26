@@ -5,18 +5,32 @@ Nemesis (fork of Twin) - a Textmode WINdow environment
 This tree is a Nemesis fork of Twin. The upstream README continues below;
 this section documents what differs.
 
-### WM side-channel socket (phase 4A)
+### WM side-channel socket (observer phases 4A–4C)
 
 The forked `twin_server` exposes a second Unix domain socket alongside the
 libtw socket, intended for an external window manager:
 
 * path: `<TmpDir>/.Twin<TWDISPLAY>-wm` (e.g. `/tmp/.Twin:0-wm`)
 * mode 0600, FD_CLOEXEC, listen backlog 1 (one WM at a time)
-* wire format: line-framed JSON, one event per line
+* wire format: line-framed JSON, one event per line, no embedded newlines
 
-Phase-4A events emitted: `{"type":"map","wid":...,"screen":...,"x":..,"y":..,"w":..,"h":..}`
-on every window map. The built-in WM remains authoritative; the attached
-external process is observer-only until further phases land.
+Events emitted (observer-only — the built-in WM remains authoritative):
+
+| Event   | Fields                                          |
+|---------|-------------------------------------------------|
+| `map`   | `wid`, `screen`, `x`, `y`, `w`, `h`             |
+| `unmap` | `wid`, `screen`                                 |
+| `mouse` | `code`, `shift`, `x`, `y`                       |
+| `key`   | `code`, `shift`, `seq` (hex-encoded AsciiSeq)   |
+| `focus` | `wid`, `old_wid`                                |
+| `move`  | `wid`, `x`, `y`                                 |
+| `resize`| `wid`, `w`, `h`                                 |
+| `raise` | `wid`                                           |
+| `lower` | `wid`                                           |
+| `close` | `wid`                                           |
+
+The attached external process is observer-only; inbound commands land in
+phase 4D-4F.
 
 ### Running from the build tree
 

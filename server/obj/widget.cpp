@@ -19,7 +19,7 @@
 #include "resize.h"  // UpdateCursor()
 #include "twin.h"    // IS_WIDGET()
 #include "draw.h"    // DrawAreaWidget()
-#include "wmsock.h"  // SendMsgToWM(), WMSockSendUnmap()
+#include "wmsock.h"  // SendMsgToWM(), WMSockSend{Focus,Unmap,Close}()
 
 #include <Tw/Twstat_defs.h> // TWS_widget_*
 
@@ -73,6 +73,13 @@ void Swidget::Delete() {
   DisOwn();
   while (Widgets.First) {
     Widgets.First->UnMap();
+  }
+  /* Mirror window destruction to the external WM (no-op if none). Sub-widgets
+   * (gadgets, rows) are filtered out so the WM only hears about top-level
+   * windows it could have learned about via map. UnMap above already shipped
+   * the paired unmap if w was top-level. */
+  if (IS_WINDOW(this)) {
+    WMSockSendClose(this);
   }
   Sobj::Delete();
 }

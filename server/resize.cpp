@@ -38,6 +38,7 @@
 #include "resize.h"
 #include "util.h"
 #include "hw.h"
+#include "wmsock.h" // WMSockSend{Move,Resize,Raise,Lower}()
 #include "stl/utf8.h"
 #include "stl/vector.h"
 
@@ -911,6 +912,10 @@ void DragFirstWindow(dat i, dat j) {
 
   if (ContainsCursor(w))
     UpdateCursor();
+
+  /* Mirror to attached external WM (no-op if none). Built-in drag is
+   * authoritative; the mirror reports the post-update top-left. */
+  WMSockSendMove(w);
 }
 
 void DragWindow(Twindow w, dat i, dat j) {
@@ -990,6 +995,10 @@ void DragWindow(Twindow w, dat i, dat j) {
   if (w == All->Screens.First->FocusW()) {
     UpdateCursor();
   }
+
+  /* Mirror to attached external WM (no-op if none). The first-window path
+   * routed through DragFirstWindow above, which mirrors itself. */
+  WMSockSendMove(w);
 }
 
 void ResizeRelFirstWindow(dat i, dat j) {
@@ -1123,6 +1132,10 @@ void ResizeRelFirstWindow(dat i, dat j) {
         (w != screen->ClickWindow || (All->State & state_any) != state_resize))
 
       CheckResizeWindowContents(w);
+
+    /* Mirror to attached external WM (no-op if none); fires only when the
+     * size actually changed. */
+    WMSockSendResize(w);
   }
 }
 
@@ -1203,6 +1216,10 @@ void ResizeRelWindow(Twindow w, dat i, dat j) {
         (w != All->Screens.First->ClickWindow || (All->State & state_any) != state_resize))
 
       CheckResizeWindowContents(w);
+
+    /* Mirror to attached external WM (no-op if none); the first-window
+     * path delegated to ResizeRelFirstWindow above, which mirrors itself. */
+    WMSockSendResize(w);
   }
 }
 
@@ -1798,6 +1815,9 @@ void RaiseWidget(Twidget w, bool alsoFocus) {
     } else {
       DrawAreaWidget(w);
     }
+    /* Mirror to attached external WM (no-op if none); fires only when the
+     * stacking order actually changed. */
+    WMSockSendRaise(w);
   }
   if (screen == All->Screens.First) {
     if (alsoFocus) {
@@ -1822,6 +1842,9 @@ void LowerWidget(Twidget w, bool alsoUnFocus) {
       } else {
         DrawAreaWidget(w);
       }
+      /* Mirror to attached external WM (no-op if none); fires only when
+       * the stacking order actually changed. */
+      WMSockSendLower(w);
     }
     if (screen == All->Screens.First) {
       if (alsoUnFocus) {

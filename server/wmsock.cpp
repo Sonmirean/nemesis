@@ -333,6 +333,43 @@ void WMSockSendUnmap(Twidget w, Tscreen screen) {
                  (unsigned long)w->Id, (unsigned long)(screen ? screen->Id : 0));
 }
 
+void WMSockSendMove(Twindow w) {
+  if (Ext(WM, WMConnFd) < 0 || !w)
+    return;
+
+  wmSendJsonLine("{\"type\":\"move\",\"wid\":%lu,\"x\":%ld,\"y\":%ld}\n",
+                 (unsigned long)w->Id, (long)w->Left, (long)w->Up);
+}
+
+void WMSockSendResize(Twindow w) {
+  if (Ext(WM, WMConnFd) < 0 || !w)
+    return;
+
+  wmSendJsonLine("{\"type\":\"resize\",\"wid\":%lu,\"w\":%ld,\"h\":%ld}\n",
+                 (unsigned long)w->Id, (long)w->XWidth, (long)w->YWidth);
+}
+
+void WMSockSendRaise(Twidget w) {
+  if (Ext(WM, WMConnFd) < 0 || !w)
+    return;
+
+  wmSendJsonLine("{\"type\":\"raise\",\"wid\":%lu}\n", (unsigned long)w->Id);
+}
+
+void WMSockSendLower(Twidget w) {
+  if (Ext(WM, WMConnFd) < 0 || !w)
+    return;
+
+  wmSendJsonLine("{\"type\":\"lower\",\"wid\":%lu}\n", (unsigned long)w->Id);
+}
+
+void WMSockSendClose(Twidget w) {
+  if (Ext(WM, WMConnFd) < 0 || !w)
+    return;
+
+  wmSendJsonLine("{\"type\":\"close\",\"wid\":%lu}\n", (unsigned long)w->Id);
+}
+
 void SendMsgToWM(Tmsg msg) {
   /* Built-in WM stays authoritative -- SendMsg first, mirror second. */
   SendMsg(Ext(WM, MsgPort), msg);

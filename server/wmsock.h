@@ -45,4 +45,18 @@ void WMSockSendFocus(Twidget newW, Twidget oldW);
  * WM in lock-step with map mirror sites. */
 void WMSockSendUnmap(Twidget w, Tscreen screen);
 
+/* Synthesized move/resize/raise/lower/close mirrors. None of these have an
+ * internal msg_* counterpart, so the relevant top-level paths in
+ * server/resize.cpp and obj/{widget,window}.cpp call these directly.
+ *
+ *   move/resize  reflect post-update w->Left/Up and w->XWidth/YWidth.
+ *   raise/lower  fire only when stacking actually changed.
+ *   close        fires once per Swindow destruction, after the paired unmap.
+ */
+void WMSockSendMove(Twindow w);
+void WMSockSendResize(Twindow w);
+void WMSockSendRaise(Twidget w);
+void WMSockSendLower(Twidget w);
+void WMSockSendClose(Twidget w);
+
 #endif /* NEMESIS_WMSOCK_H */

@@ -20,6 +20,7 @@
 #include "resize.h"  // UpdateCursor(), RollUpWindow()
 #include "twin.h"    // NOFD, NOPID, NOSLOT
 #include "util.h"    // Minimum()
+#include "wmsock.h"  // WMSockSendMove()
 
 #include <Tutf/Tutf.h>      // Tutf_CP437_to_UTF_32[]
 #include <Tw/Twstat_defs.h> // TWS_window_*
@@ -364,6 +365,11 @@ void Swindow::SetXY(dat x, dat y) {
     }
     Insert(parent, prev, next);
     DrawAreaWindow(this);
+    /* Mirror to attached external WM only when re-parented to a screen
+     * (matches map/unmap mirror semantics: top-level only). */
+    if (IS_SCREEN(parent)) {
+      WMSockSendMove(this);
+    }
   }
 }
 

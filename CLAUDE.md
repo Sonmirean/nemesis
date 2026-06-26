@@ -15,10 +15,17 @@ project overview and the in-tree run recipe.
 Roadmap shorthand used in source comments:
 - **Phase 4A — observer-only (landed)**: built-in WM authoritative,
   external WM receives `map` events only.
-- **Phase 4B — event coverage (in progress)**: `unmap`, `mouse`, `key`
-  events mirrored through `SendMsgToWM(Tmsg msg)` dispatcher.
-- **Phase 4C–4F (planned)**: focus/move/resize/raise/close events, then
-  inbound commands.
+- **Phase 4B — event coverage (landed)**: `unmap`, `mouse`, `key` events
+  mirrored. `mouse`/`key` ride the `SendMsgToWM(Tmsg msg)` dispatcher;
+  `unmap` is synthesized from `Swidget::UnMap()` (no `msg_unmap` exists).
+- **Phase 4C — window-state coverage (landed)**: `focus`, `move`,
+  `resize`, `raise`, `lower`, `close` events. All synthesized — none of
+  these go through `Tmsg` either, so the `Swidget`/`Swindow` /
+  `RaiseWidget`/`LowerWidget`/`DragWindow`/`ResizeRelWindow` paths call
+  `WMSockSend<Type>` directly.
+- **Phase 4D–4F (planned)**: inbound commands from the external WM
+  (parser, focus/move/resize/raise requests), then write-queue
+  back-pressure.
 
 Nemesis-specific commits are prefixed `nemesis:`. Upstream commits land
 on top via merge; do not rewrite upstream history.
@@ -31,9 +38,19 @@ on top via merge; do not rewrite upstream history.
   (`/tmp/twin-plugins` symlink farm + `--plugindir=`).
 - Verify the side-channel after a code change to `wmsock` or `util`:
   - `ls -l /tmp/.Twin:0-wm` while server is up → `srw-------` (0600).
-  - `socat - UNIX-CONNECT:/tmp/.Twin:0-wm` in a second terminal,
-    then open any twin client (e.g. `./clients/twclock`); a JSON line
-    `{"type":"map",…}` must appear.
+  - Drive the socket: `socat - UNIX-CONNECT:/tmp/.Twin:0-wm` if available,
+    or `python3 -c 'import socket;s=socket.socket(socket.AF_UNIX,
+    socket.SOCK_STREAM);s.connect("/tmp/.Twin:0-wm");print(s.recv(4096).decode())'`,
+    then open any small twin client (e.g. `./clients/twcuckoo`); a JSON
+    line `{"type":"map",…}` must appear.
+  - **Do not smoke-test with `twclutter`.** It is an unbounded stress
+    test ("Useless client that spams twin with windows") — on X11 it can
+    create hundreds of thousands of windows in seconds and overwhelm the
+    backend. Use it only when you specifically want load.
+  - For coverage beyond `map`, build a small libtw exerciser pattern
+    after `clients/clutter.c` (needs a real `tmenu` from `TwCreateMenu`,
+    not NULL) and exercise `TwSetXYWindow`/`TwResizeWindow`/`TwRaise/Lower
+    Window`/`TwDeleteWindow` to drive the synthesized mirrors.
   - `kill <pid>` the server cleanly; `ls /tmp/.Twin:0-wm` must report
     no such file. That proves `WMSockShutdown` ran via `QuitTWDisplay`.
 
@@ -111,17 +128,39 @@ drops are debuggable only post-mortem.
 
 ## Event-mirror sites
 
-All `SendMsg(Ext(WM, MsgPort), msg)` callsites that need WM-side mirroring
-go through `SendMsgToWM(Tmsg msg)` (`server/wmsock.cpp`). It dispatches to
-the built-in WM first (invariant 1), then mirrors by `msg->Type`. Today
-that covers `msg_map`, `msg_mouse`, `msg_key`. When you add a new mirrored
-msg type, extend the switch in `SendMsgToWM` and add a file-static
-`wmSend<Type>` formatter alongside the existing ones.
+Mirrors come in two flavors:
 
-Exception: `Swidget::UnMap` synthesizes an `unmap` mirror via
-`WMSockSendUnmap` directly — there is no `msg_unmap` for the dispatcher to
-hand off. Map and unmap mirror calls are paired in `obj/widget.cpp`; keep
-them in lock-step.
+**Dispatcher route** — for events that already flow through `Tmsg`. The
+relevant `SendMsg(Ext(WM, MsgPort), msg)` callsite is replaced with
+`SendMsgToWM(msg)`, which calls `SendMsg` first (invariant 1) and then
+dispatches by `msg->Type`. Today: `msg_map`, `msg_mouse`, `msg_key`. Add a
+new mirrored msg type by extending the switch in `SendMsgToWM` and adding
+a file-static `wmSend<Type>` formatter.
+
+**Synthesized route** — for state changes that have no `Tmsg`
+counterpart. The state-changing function calls a public `WMSockSend<Type>`
+helper directly (also defined in `wmsock.cpp`, sitting beside the dispatcher
+helpers). Today:
+
+| Event   | Helper                | Call site                                              |
+|---------|-----------------------|--------------------------------------------------------|
+| unmap   | `WMSockSendUnmap`     | `Swidget::UnMap` (paired with the map mirror)          |
+| focus   | `WMSockSendFocus`     | `Swidget::Focus` (called only when focus actually shifted) |
+| move    | `WMSockSendMove`      | `DragFirstWindow`, `DragWindow`, `Swindow::SetXY`      |
+| resize  | `WMSockSendResize`    | `ResizeRelFirstWindow`, `ResizeRelWindow` (inside `if (DeltaX||DeltaY)`) |
+| raise   | `WMSockSendRaise`     | `RaiseWidget` (inside `if (screen->Widgets.First != w)`) |
+| lower   | `WMSockSendLower`     | `LowerWidget` (inside `if (screen->Widgets.Last != w)`) |
+| close   | `WMSockSendClose`     | `Swidget::Delete` (after children UnMap, `IS_WINDOW` only) |
+
+Pairing/ordering rules:
+- **map ↔ unmap** are paired in `obj/widget.cpp` — keep them in lock-step.
+- **close** fires after the corresponding **unmap** when a mapped window is
+  destroyed. An unmap without a close means "hidden temporarily"; a close
+  means "wid is gone, drop your bookkeeping."
+- **raise/lower** fire only when stacking actually changed (the helpers are
+  inside the position-change `if`).
+- **move/resize** fire after the geometry update, so they reflect the
+  post-change `w->Left/Up` and `w->XWidth/YWidth`.
 
 The mouse merge-coalesce path in `StdAddMouseEvent`
 (`server/hw_multi.cpp:1122-1128`) mutates the tail-queued msg without
