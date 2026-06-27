@@ -31,6 +31,10 @@
 #include "obj/widget.h"
 #include "obj/screen.h"
 
+#include "obj/id.h"
+#include "obj/magic.h"
+#include "resize.h"
+
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -41,8 +45,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 
-/* EOF/error watcher; phase 4F will need a larger buffer for inbound commands. */
+/* Per-connection inbound line buffer. One line at a time; excess backpressures
+ * the external WM's write() via kernel socket buffer. Phase 4F adds queuing. */
 #define WMSOCK_READ_BUFSZ 256
 /* Current map event is ~110 bytes; margin left for format growth in phases 4B-4F. */
 #define WMSOCK_JSON_LINE_BUFSZ 160
@@ -54,6 +60,17 @@ static uldat wmConnSlot = NOSLOT;
 static struct sockaddr_un wmAddr;
 static bool wmPathBound = false;
 
+/* Inbound line accumulator. Holds bytes read from the connected WM that have
+ * not yet been terminated by '\n'. Sized to the same cap as the read buffer;
+ * a line longer than this is rejected with a malformed reply. */
+static char wmInBuf[WMSOCK_READ_BUFSZ];
+static int wmInBufLen = 0;
+
+/* Phase 4D config flags. Set via WMSockSetFlags(); defaults match the spec
+ * (offscreen forbidden, debug echo off). Finalized twinrc integration deferred. */
+static bool wmAllowOffscreen = false;
+static bool wmDebugReplies = false;
+
 static void wmCloseConn(void) {
   if (wmConnSlot != NOSLOT) {
     UnRegisterRemote(wmConnSlot);
@@ -63,18 +80,338 @@ static void wmCloseConn(void) {
     close(Ext(WM, WMConnFd));
     Ext(WM, WMConnFd) = -1;
   }
+  wmInBufLen = 0;
 }
 
-/* Connected-fd read handler.
- * Phase-4A: WM is observer-only. We only watch for EOF/error here so we can
- * release the slot when the WM disconnects. Inbound commands come in Phase 4F.
- */
-static void wmConnRead(int fd, uldat /*slot*/) {
-  char buf[WMSOCK_READ_BUFSZ];
+/* ---------- inbound command infrastructure (Phase 4D) ---------- */
+
+/* Forward declaration: wmSendJsonLine is defined after this block. */
+static void wmSendJsonLine(const char *fmt, ...);
+
+/* Emit a reply line. hasId=false means the id field could not be parsed;
+ * in that case the reply omits id (§6.3 of the protocol spec). */
+static void wmSendReply(bool hasId, unsigned long id, bool ok, const char *error) {
+  if (ok) {
+    if (hasId)
+      wmSendJsonLine("{\"reply\":true,\"id\":%lu,\"ok\":true}\n", id);
+    else
+      wmSendJsonLine("{\"reply\":true,\"ok\":true}\n");
+  } else {
+    if (hasId)
+      wmSendJsonLine("{\"reply\":true,\"id\":%lu,\"ok\":false,\"error\":\"%s\"}\n", id, error);
+    else
+      wmSendJsonLine("{\"reply\":true,\"ok\":false,\"error\":\"%s\"}\n", error);
+  }
+}
+
+static const char *wmSkipWs(const char *p) {
+  while (*p == ' ' || *p == '\t' || *p == '\r')
+    p++;
+  return p;
+}
+
+/* Advance past a JSON string literal at p (which must be at the opening ").
+ * Does not store the value; used for skipping unknown fields. */
+static const char *wmSkipStr(const char *p) {
+  if (*p != '"')
+    return NULL;
+  p++;
+  while (*p && *p != '"') {
+    if (*p == '\\') {
+      p++;
+      if (!*p)
+        return NULL;
+    }
+    p++;
+  }
+  return (*p == '"') ? p + 1 : NULL;
+}
+
+/* Read a JSON string literal at p (at opening ") into buf[bufsz].
+ * Returns pointer past closing ", or NULL on error/overflow. */
+static const char *wmReadStr(const char *p, char *buf, size_t bufsz) {
+  if (*p != '"')
+    return NULL;
+  p++;
+  size_t n = 0;
+  while (*p && *p != '"' && *p != '\n') {
+    char c;
+    if (*p == '\\') {
+      p++;
+      if (!*p)
+        return NULL;
+      switch (*p) {
+      case '"':  c = '"';  break;
+      case '\\': c = '\\'; break;
+      case '/':  c = '/';  break;
+      case 'n':  c = '\n'; break;
+      case 'r':  c = '\r'; break;
+      case 't':  c = '\t'; break;
+      default:   return NULL;
+      }
+    } else {
+      c = *p;
+    }
+    if (n >= bufsz - 1)
+      return NULL;
+    buf[n++] = c;
+    p++;
+  }
+  if (*p != '"')
+    return NULL;
+  buf[n] = '\0';
+  return p + 1;
+}
+
+struct WMCmd {
+  char cmd[32];
+  unsigned long id;
+  unsigned long wid;
+  long x, y, w, h;
+  bool has_id, has_wid, has_x, has_y, has_w, has_h;
+};
+
+/* Parse a flat JSON command object from line into out.
+ * Returns true if cmd and id were successfully extracted.
+ * Sets *err to a protocol error code string on failure. */
+static bool wmParseCmd(const char *line, WMCmd *out, const char **err) {
+  memset(out, 0, sizeof(*out));
+  const char *p = wmSkipWs(line);
+  if (*p != '{') {
+    *err = "malformed";
+    return false;
+  }
+  p++;
+
   for (;;) {
-    ssize_t n = read(fd, buf, sizeof(buf));
+    p = wmSkipWs(p);
+    if (*p == '}')
+      break;
+    if (*p == ',') {
+      p++;
+      continue;
+    }
+    if (*p != '"') {
+      *err = "malformed";
+      return false;
+    }
+
+    char key[32];
+    p = wmReadStr(p, key, sizeof(key));
+    if (!p) {
+      *err = "malformed";
+      return false;
+    }
+    p = wmSkipWs(p);
+    if (*p != ':') {
+      *err = "malformed";
+      return false;
+    }
+    p = wmSkipWs(p + 1);
+
+    if (strcmp(key, "cmd") == 0) {
+      p = wmReadStr(p, out->cmd, sizeof(out->cmd));
+      if (!p) {
+        *err = "malformed";
+        return false;
+      }
+    } else if (strcmp(key, "id") == 0) {
+      char *ep;
+      unsigned long v = strtoul(p, &ep, 10);
+      if (ep == p || v > 0xFFFFFFFFUL) {
+        *err = "malformed";
+        return false;
+      }
+      out->id = v;
+      out->has_id = true;
+      p = ep;
+    } else if (strcmp(key, "wid") == 0) {
+      char *ep;
+      out->wid = strtoul(p, &ep, 10);
+      if (ep == p) {
+        *err = "malformed";
+        return false;
+      }
+      out->has_wid = true;
+      p = ep;
+    } else if (strcmp(key, "x") == 0) {
+      char *ep;
+      out->x = strtol(p, &ep, 10);
+      if (ep == p) {
+        *err = "malformed";
+        return false;
+      }
+      out->has_x = true;
+      p = ep;
+    } else if (strcmp(key, "y") == 0) {
+      char *ep;
+      out->y = strtol(p, &ep, 10);
+      if (ep == p) {
+        *err = "malformed";
+        return false;
+      }
+      out->has_y = true;
+      p = ep;
+    } else if (strcmp(key, "w") == 0) {
+      char *ep;
+      out->w = strtol(p, &ep, 10);
+      if (ep == p) {
+        *err = "malformed";
+        return false;
+      }
+      out->has_w = true;
+      p = ep;
+    } else if (strcmp(key, "h") == 0) {
+      char *ep;
+      out->h = strtol(p, &ep, 10);
+      if (ep == p) {
+        *err = "malformed";
+        return false;
+      }
+      out->has_h = true;
+      p = ep;
+    } else {
+      /* Unknown field: skip value (string or scalar). */
+      if (*p == '"') {
+        p = wmSkipStr(p);
+        if (!p) {
+          *err = "malformed";
+          return false;
+        }
+      } else {
+        while (*p && *p != ',' && *p != '}')
+          p++;
+      }
+    }
+  }
+
+  if (!out->cmd[0] || !out->has_id) {
+    *err = "malformed";
+    return false;
+  }
+  *err = NULL;
+  return true;
+}
+
+static void wmDispatchCmd(const char *line, size_t /*len*/) {
+  WMCmd cmd;
+  const char *err = NULL;
+
+  if (!wmParseCmd(line, &cmd, &err)) {
+    wmSendReply(cmd.has_id, cmd.id, false, err ? err : "malformed");
+    return;
+  }
+
+  /* All current verbs take a wid; reject wid=0 (reserved). */
+  if (!cmd.has_wid || cmd.wid == 0) {
+    wmSendReply(true, cmd.id, false, "unknown_wid");
+    return;
+  }
+
+  /* Look up the widget, then verify it is a window. */
+  Twidget any = (Twidget)Id2Obj(Twidget_class_byte, (uldat)cmd.wid);
+  if (!any) {
+    wmSendReply(true, cmd.id, false, "unknown_wid");
+    return;
+  }
+  if (!IS_WINDOW(any)) {
+    wmSendReply(true, cmd.id, false, "not_a_window");
+    return;
+  }
+  Twindow w = (Twindow)any;
+
+  if (strcmp(cmd.cmd, "focus") == 0) {
+    w->Focus();
+    wmSendReply(true, cmd.id, true, NULL);
+
+  } else if (strcmp(cmd.cmd, "move") == 0) {
+    if (!cmd.has_x || !cmd.has_y) {
+      wmSendReply(true, cmd.id, false, "malformed");
+      return;
+    }
+    /* dat is int16; verify range before narrowing cast. */
+    if (cmd.x < -32768 || cmd.x > 32767 || cmd.y < -32768 || cmd.y > 32767) {
+      wmSendReply(true, cmd.id, false, "out_of_bounds");
+      return;
+    }
+    if (!wmAllowOffscreen && w->Parent && IS_SCREEN(w->Parent)) {
+      Tscreen screen = (Tscreen)w->Parent;
+      if (cmd.x < 0) cmd.x = 0;
+      if (cmd.y < 0) cmd.y = 0;
+      if (cmd.x >= (long)screen->XWidth)  cmd.x = (long)screen->XWidth  - 1;
+      if (cmd.y >= (long)screen->YWidth)  cmd.y = (long)screen->YWidth  - 1;
+    }
+    DragWindow(w, (dat)cmd.x - w->Left, (dat)cmd.y - w->Up);
+    if (wmDebugReplies)
+      wmSendJsonLine("{\"reply\":true,\"id\":%lu,\"ok\":true,\"x\":%ld,\"y\":%ld}\n",
+                     cmd.id, (long)w->Left, (long)w->Up);
+    else
+      wmSendReply(true, cmd.id, true, NULL);
+
+  } else if (strcmp(cmd.cmd, "resize") == 0) {
+    if (!cmd.has_w || !cmd.has_h) {
+      wmSendReply(true, cmd.id, false, "malformed");
+      return;
+    }
+    if (cmd.w <= 0 || cmd.h <= 0 || cmd.w > 65535 || cmd.h > 65535) {
+      wmSendReply(true, cmd.id, false, "out_of_bounds");
+      return;
+    }
+    ResizeRelWindow(w, (dat)cmd.w - (dat)w->XWidth, (dat)cmd.h - (dat)w->YWidth);
+    if (wmDebugReplies)
+      wmSendJsonLine("{\"reply\":true,\"id\":%lu,\"ok\":true,\"w\":%ld,\"h\":%ld}\n",
+                     cmd.id, (long)w->XWidth, (long)w->YWidth);
+    else
+      wmSendReply(true, cmd.id, true, NULL);
+
+  } else if (strcmp(cmd.cmd, "raise") == 0) {
+    RaiseWidget((Twidget)w, false);
+    wmSendReply(true, cmd.id, true, NULL);
+
+  } else if (strcmp(cmd.cmd, "lower") == 0) {
+    LowerWidget((Twidget)w, false);
+    wmSendReply(true, cmd.id, true, NULL);
+
+  } else if (strcmp(cmd.cmd, "close") == 0) {
+    /* Delete fires unmap+close events (§7 ordering) before we reply. */
+    w->Delete();
+    wmSendReply(true, cmd.id, true, NULL);
+
+  } else {
+    wmSendReply(true, cmd.id, false, "unknown_cmd");
+  }
+}
+
+/* Connected-fd read handler. Accumulates bytes into wmInBuf, dispatches each
+ * complete newline-terminated line to wmDispatchCmd. */
+static void wmConnRead(int fd, uldat /*slot*/) {
+  for (;;) {
+    int space = (int)(sizeof(wmInBuf) - 1) - wmInBufLen;
+    if (space <= 0) {
+      /* Buffer full with no newline: line exceeds cap. */
+      log(WARNING) << "twin: WM side-channel: inbound line too long, dropping\n";
+      wmSendReply(false, 0, false, "malformed");
+      wmInBufLen = 0;
+      char discard[64];
+      { ssize_t dr = read(fd, discard, sizeof(discard)); (void)dr; }
+      return;
+    }
+    ssize_t n = read(fd, wmInBuf + wmInBufLen, (size_t)space);
     if (n > 0) {
-      /* Drop. Inbound parser will live here in Phase 4F. */
+      wmInBufLen += (int)n;
+      int base = 0;
+      while (base < wmInBufLen) {
+        char *nl = (char *)memchr(wmInBuf + base, '\n', wmInBufLen - base);
+        if (!nl)
+          break;
+        *nl = '\0';
+        if (nl - (wmInBuf + base) > 0)
+          wmDispatchCmd(wmInBuf + base, (size_t)(nl - (wmInBuf + base)));
+        base = (int)(nl - wmInBuf) + 1;
+      }
+      if (base > 0 && base < wmInBufLen)
+        memmove(wmInBuf, wmInBuf + base, wmInBufLen - base);
+      wmInBufLen = (base < wmInBufLen) ? (wmInBufLen - base) : 0;
       continue;
     }
     if (n == 0) {
@@ -202,6 +539,11 @@ bool WMSockInit(void) {
   wmListenSlot = slot;
   log(INFO) << "twin: WM side-channel: listening on " << Chars::from_c(wmAddr.sun_path) << "\n";
   return true;
+}
+
+void WMSockSetFlags(bool allowOffscreen, bool debugReplies) {
+  wmAllowOffscreen = allowOffscreen;
+  wmDebugReplies = debugReplies;
 }
 
 void WMSockShutdown(void) {

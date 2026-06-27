@@ -28,6 +28,12 @@
 bool WMSockInit(void);
 void WMSockShutdown(void);
 
+/* Set Phase 4D config flags. Must be called before the first client attaches.
+ * allowOffscreen: if false (default), cmd:move clamps to screen bounds.
+ * debugReplies:   if true, cmd:move and cmd:resize success replies include
+ *                 post-clamp geometry (§6.2 of docs/wmsock-protocol.md). */
+void WMSockSetFlags(bool allowOffscreen, bool debugReplies);
+
 /* Send msg to the built-in WM and mirror it to the attached external WM
  * (no-op mirror if none). Phase 4A invariant: built-in WM stays
  * authoritative, external WM is observer-only -- the SendMsg fires first

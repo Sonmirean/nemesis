@@ -23,9 +23,17 @@ Roadmap shorthand used in source comments:
   these go through `Tmsg` either, so the `Swidget`/`Swindow` /
   `RaiseWidget`/`LowerWidget`/`DragWindow`/`ResizeRelWindow` paths call
   `WMSockSend<Type>` directly.
-- **Phase 4D–4F (planned)**: inbound commands from the external WM
-  (parser, focus/move/resize/raise requests), then write-queue
-  back-pressure.
+- **Phase 4D — inbound commands (landed)**: external WM sends
+  line-framed JSON commands (`focus`, `move`, `resize`, `raise`, `lower`,
+  `close`) on the same socket; server dispatches to the same internal
+  entrypoints as the built-in WM and replies with `{"reply":true,...}`.
+  Hand-rolled zero-alloc JSON parser in `wmsock.cpp`. Config flags
+  (`wmAllowOffscreen`, `wmDebugReplies`) are file-static bools set via
+  `WMSockSetFlags()`; twinrc integration deferred to 4E.
+- **Phase 4E (planned)**: twinrc integration for `wm_sidechannel_allow_offscreen`
+  and `wm_sidechannel_debug` flags.
+- **Phase 4F (planned)**: outbound write queue (`RemoteWriteQueue`/`RemoteFlush`)
+  to make event and reply delivery reliable under slow consumers.
 
 Nemesis-specific commits are prefixed `nemesis:`. Upstream commits land
 on top via merge; do not rewrite upstream history.
