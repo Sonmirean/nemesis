@@ -23,7 +23,7 @@
 #include "main.h"
 #include "log.h"
 #include "methods.h" // SendMsg()
-#include "remote.h"
+#include "remote.h"  // RemoteWriteQueue, RemoteFlush
 #include "extreg.h"
 #include "util.h"
 #include "obj/event.h"
@@ -48,9 +48,9 @@
 #include <stdlib.h>
 
 /* Per-connection inbound line buffer. One line at a time; excess backpressures
- * the external WM's write() via kernel socket buffer. Phase 4F adds queuing. */
+ * the external WM's write() via kernel socket buffer. */
 #define WMSOCK_READ_BUFSZ 256
-/* Current map event is ~110 bytes; margin left for format growth in phases 4B-4F. */
+/* Current map event is ~110 bytes; margin left for format growth. */
 #define WMSOCK_JSON_LINE_BUFSZ 160
 /* One WM at a time, by design. See wmsock.h doc-block. */
 #define WMSOCK_LISTEN_BACKLOG 1
@@ -562,40 +562,33 @@ void WMSockShutdown(void) {
   }
 }
 
-/* Best-effort write; never blocks the server. On EPIPE we drop the client.
- * SIGPIPE is SIG_IGN process-wide via InitSignals (hw.cpp:155, 210-211),
- * so write() returns -1/EPIPE instead of killing the server.
+/* Queue a line for the attached WM. RemoteWriteQueue appends to the per-slot
+ * outbound buffer (grows on demand); RemoteFlush tries to drain immediately
+ * and, if the kernel buffer is full, leaves the rest queued with the fd
+ * registered in save_wfds so the main loop's RemoteFlushAll drains it when
+ * the peer reads.
+ *
+ * Disconnect detection still rides the read path: when the peer closes,
+ * wmConnRead sees EOF and calls wmCloseConn, which UnRegisterRemote()s the
+ * slot — freeing any still-queued bytes. SIGPIPE is SIG_IGN process-wide via
+ * InitSignals (hw.cpp:155, 210-211), so a stale write returns -1/EPIPE
+ * instead of killing the server; the queue holds until the next read cycle
+ * closes the slot.
  */
 static void wmConnWriteLine(const char *buf, size_t len) {
-  if (Ext(WM, WMConnFd) < 0)
+  if (wmConnSlot == NOSLOT || Ext(WM, WMConnFd) < 0)
     return;
 
-  size_t off = 0;
-  while (off < len) {
-    ssize_t n = write(Ext(WM, WMConnFd), buf + off, len - off);
-    if (n > 0) {
-      off += (size_t)n;
-      continue;
-    }
-    if (n < 0 && (errno == EINTR))
-      continue;
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      /* Phase-4A: a slow WM that won't drain its read buffer is its own
-       * problem; we drop the message instead of growing an in-server queue.
-       * Phase 4F will replace this with RemoteWriteQueue / RemoteFlush. */
-      break;
-    }
-    /* EPIPE / ECONNRESET / other: tear down. */
-    log(WARNING) << "twin: WM side-channel: write error, dropping client: "
-                 << Chars::from_c(strerror(errno)) << "\n";
-    wmCloseConn();
-    break;
+  if (RemoteWriteQueue(wmConnSlot, (uldat)len, buf) == 0) {
+    log(WARNING) << "twin: WM side-channel: RemoteWriteQueue failed, dropping message\n";
+    return;
   }
+  (void)RemoteFlush(wmConnSlot);
 }
 
 /* Format one JSON line and ship it. Central truncation guard: silent drops
  * are debuggable only post-mortem, so any oversize event surfaces as a
- * warning. New event types added in phases 4B-4E go through here. */
+ * warning. Every outbound event and reply type goes through here. */
 static void wmSendJsonLine(const char *fmt, ...) {
   if (Ext(WM, WMConnFd) < 0)
     return;

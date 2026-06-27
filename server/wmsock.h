@@ -11,6 +11,14 @@
 
 #include "obj/fwd.h"
 
+/* Twinrc-driven side-channel behavior flags.
+ * Packed into the byte yielded by the rcparse shm OR/XOR pair
+ * GlobalWMSidechannelFlags[2] and applied via WMSockSetFlags(). */
+enum e_wm_sidechannel_flag {
+  wm_sidechannel_allow_offscreen = 0x01, /* WmSidechannelAllowOffscreen */
+  wm_sidechannel_debug = 0x02,           /* WmSidechannelDebug */
+};
+
 /*
  * Nemesis WM side-channel socket.
  *
@@ -28,7 +36,11 @@
 bool WMSockInit(void);
 void WMSockShutdown(void);
 
-/* Set Phase 4D config flags. Must be called before the first client attaches.
+/* Set inbound-command behavior flags. Safe to call at any time; values take
+ * effect on the next dispatched command. Wired to twinrc via
+ * `GlobalFlags +WmSidechannelAllowOffscreen +WmSidechannelDebug` (and the
+ * `-` / `On` / `Off` / `Toggle` variants) — see ReadGlobals() in rcparse.h.
+ *
  * allowOffscreen: if false (default), cmd:move clamps to screen bounds.
  * debugReplies:   if true, cmd:move and cmd:resize success replies include
  *                 post-clamp geometry (§6.2 of docs/wmsock-protocol.md). */

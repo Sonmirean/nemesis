@@ -144,6 +144,10 @@ MenuRelax    { yylval.val = MENU_RELAX;   return GLOBAL_FLAG; }
 ScreenScroll|EdgeScroll    {
                yylval.val = SCREEN_SCROLL;return GLOBAL_FLAG; }
 TerminalsUtf8 { yylval.val = TERMINALS_UTF8; return GLOBAL_FLAG; }
+WmSidechannelAllowOffscreen {
+               yylval.val = WM_SIDECHANNEL_ALLOW_OFFSCREEN; return GLOBAL_FLAG; }
+WmSidechannelDebug {
+               yylval.val = WM_SIDECHANNEL_DEBUG; return GLOBAL_FLAG; }
 Alt          { yylval.val = KBD_ALT_FL;   return KBD_FLAG; }
 Ctrl         { yylval.val = KBD_CTRL_FL;  return KBD_FLAG; }
 Shift        { yylval.val = KBD_SHIFT_FL; return KBD_FLAG; }

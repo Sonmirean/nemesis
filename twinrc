@@ -213,6 +213,19 @@ GlobalFlags -MenuInfo
 # don't relax menu navigation
 GlobalFlags -MenuRelax
 #
+# Nemesis: WM side-channel (server/wmsock.cpp) behavior
+#
+# WmSidechannelAllowOffscreen: if On, accept move-cmd coordinates that place
+# the window outside the screen rect. If Off (default), the server clamps
+# them to the screen. Affects external WMs driving DragWindow via the JSON
+# socket; the built-in WM is unaffected.
+GlobalFlags -WmSidechannelAllowOffscreen
+#
+# WmSidechannelDebug: if On, successful move/resize replies echo the
+# post-clamp geometry so the external WM can verify what landed. See
+# docs/wmsock-protocol.md §6.2.
+GlobalFlags -WmSidechannelDebug
+#
 #
 # choose the mouse button used for click-to-focus,
 # for text selection and to activate window gadgets.
@@ -464,7 +477,7 @@ ExecTty "" ; Wait "Twin Term" ; Maximize
 #
 # Focus [On|Off|Toggle]
 #
-# GlobalFlags [+|-][AltFont] [+|-][AlwaysCursor] [+|-][Blink] [+|-][EdgeScroll] [+|-][HideMenu] [+|-][MenuInfo] [+|-][MenuRelax] [+|-][Shadows <x> <y>]
+# GlobalFlags [+|-][AltFont] [+|-][AlwaysCursor] [+|-][Blink] [+|-][EdgeScroll] [+|-][HideMenu] [+|-][MenuInfo] [+|-][MenuRelax] [+|-][Shadows <x> <y>] [+|-][WmSidechannelAllowOffscreen] [+|-][WmSidechannelDebug]
 #
 # Interactive <kind>
 # # choose one of: Scroll, Move, Resize, Screen, Menu

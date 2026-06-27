@@ -30,10 +30,23 @@ Roadmap shorthand used in source comments:
   Hand-rolled zero-alloc JSON parser in `wmsock.cpp`. Config flags
   (`wmAllowOffscreen`, `wmDebugReplies`) are file-static bools set via
   `WMSockSetFlags()`; twinrc integration deferred to 4E.
-- **Phase 4E (planned)**: twinrc integration for `wm_sidechannel_allow_offscreen`
-  and `wm_sidechannel_debug` flags.
-- **Phase 4F (planned)**: outbound write queue (`RemoteWriteQueue`/`RemoteFlush`)
-  to make event and reply delivery reliable under slow consumers.
+- **Phase 4E — twinrc integration (landed)**: `WmSidechannelAllowOffscreen`
+  and `WmSidechannelDebug` GlobalFlags keywords wired through the
+  flex/bison parser (`rcparse.l`, `rcparse.y`, `rcparse.h`). State is
+  shipped from the parse-child to the parent via a parallel
+  `GlobalWMSidechannelFlags[2]` OR/XOR array in the shm pool and applied
+  in `ReadGlobals()` via `WMSockSetFlags()`. The existing 8-bit
+  `Ssetup::Flags` field was already 7/8 bits used, so adding a new
+  shipped array isolates wmsock policy from core setup flags. Both
+  default off; example `twinrc` documents them.
+- **Phase 4F — outbound write queue (landed)**: `wmConnWriteLine` now
+  routes every JSON line through `RemoteWriteQueue` + `RemoteFlush`
+  instead of issuing a raw `write()`. A slow or paused external WM no
+  longer drops events: bytes sit in the per-slot queue, `RemoteFlushAll`
+  in the main loop drains them, and `select(2)` registers the fd as
+  writable via `save_wfds`. Tear-down on the read path still calls
+  `wmCloseConn` → `UnRegisterRemote`, which frees the queue. Accepts a
+  brief `EPIPE` busy-loop window between peer close and next select cycle.
 
 Nemesis-specific commits are prefixed `nemesis:`. Upstream commits land
 on top via merge; do not rewrite upstream history.
@@ -68,8 +81,11 @@ on top via merge; do not rewrite upstream history.
    in phase 4A. Mirror calls must come *after* `SendMsg(Ext(WM, MsgPort), msg)`,
    never before, never instead of.
 2. **The mirror is best-effort.** A slow or absent external WM must
-   never block the server. `EAGAIN` on the write path drops the message
-   (phase 4A); phase 4F will add `RemoteWriteQueue`/`RemoteFlush`.
+   never block the server. Phase 4F routes outbound JSON through
+   `RemoteWriteQueue`/`RemoteFlush`, so transient slowness is absorbed by
+   the per-slot queue; the queue is bounded by the same backpressure
+   logic that applies to the libtw socket. The mirror still never blocks
+   the WM event loop.
 3. **`InitWM` loads `SocketSo` unconditionally** (`server/wm.cpp`).
    This is a nemesis policy change vs upstream so external clients
    (`twclutter`, `twterm`, `twattach`) can attach regardless of `--hw=…`.

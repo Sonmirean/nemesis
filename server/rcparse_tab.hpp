@@ -125,13 +125,15 @@ extern int yydebug;
     SCREEN_SCROLL = 326,           /* SCREEN_SCROLL  */
     TERMINALS_UTF8 = 327,          /* TERMINALS_UTF8  */
     SHADOWS = 328,                 /* SHADOWS  */
-    BUTTON_PASTE = 329,            /* BUTTON_PASTE  */
-    BUTTON_SELECTION = 330,        /* BUTTON_SELECTION  */
-    RGB = 331,                     /* RGB  */
-    COL_HIGH = 332,                /* COL_HIGH  */
-    KBD_FLAG = 333,                /* KBD_FLAG  */
-    NUMBER = 334,                  /* NUMBER  */
-    STRING = 335                   /* STRING  */
+    WM_SIDECHANNEL_ALLOW_OFFSCREEN = 329, /* WM_SIDECHANNEL_ALLOW_OFFSCREEN  */
+    WM_SIDECHANNEL_DEBUG = 330,    /* WM_SIDECHANNEL_DEBUG  */
+    BUTTON_PASTE = 331,            /* BUTTON_PASTE  */
+    BUTTON_SELECTION = 332,        /* BUTTON_SELECTION  */
+    RGB = 333,                     /* RGB  */
+    COL_HIGH = 334,                /* COL_HIGH  */
+    KBD_FLAG = 335,                /* KBD_FLAG  */
+    NUMBER = 336,                  /* NUMBER  */
+    STRING = 337                   /* STRING  */
   };
   typedef enum yytokentype yytoken_kind_t;
 #endif

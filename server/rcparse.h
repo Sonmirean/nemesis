@@ -70,6 +70,7 @@
  *
  * GlobalFlags [[+|-]AltFont] [[+|-]CursorAlways] [[+|-]Blink] [[+|-]ScreenScroll]
  * [[+|-]TerminalsUtf8] [[+|-]MenuHide] [[+|-]MenuItems] [[+|-]Shadows] [Shadows <x> <y>]
+ * [[+|-]WmSidechannelAllowOffscreen] [[+|-]WmSidechannelDebug]
  * [ButtonSelection <n>]
  *
  * Interactive <kind>
@@ -166,10 +167,15 @@
 #include "rcparse_tab.hpp"
 #include "unaligned.h"
 #include "log.h"
-#include "printk.h" // printk_receive_fd()
+#include "printk.h"  // printk_receive_fd()
+#include "wmsock.h"  // WMSockSetFlags, e_wm_sidechannel_flag
 
 ldat GlobalFlags[4];
 ldat GlobalShadows[2];
+/* OR / XOR pair for nemesis WM side-channel flags (e_wm_sidechannel_flag bits).
+ * Same +/-/On/Off/Toggle semantics as GlobalFlags; shipped via shm next to
+ * GlobalShadows, applied in ReadGlobals() by calling WMSockSetFlags(). */
+ldat GlobalWMSidechannelFlags[2];
 
 static void yyerror(const char *s) {
   log(ERROR) << "twin: " << Chars::from_c(FILE_NAME) << ":" << LINE_NO << ": " << Chars::from_c(s)
@@ -373,6 +379,32 @@ static byte ImmGlobalFlags(node l) {
   ldat i, j;
 
   for (; l; l = l->next) {
+    /* Nemesis WM side-channel flags route to a separate OR/XOR pair
+     * (GlobalWMSidechannelFlags) rather than All->SetUp->Flags. */
+    if (l->id == WM_SIDECHANNEL_ALLOW_OFFSCREEN || l->id == WM_SIDECHANNEL_DEBUG) {
+      ldat bit = (l->id == WM_SIDECHANNEL_ALLOW_OFFSCREEN) ? wm_sidechannel_allow_offscreen
+                                                           : wm_sidechannel_debug;
+      switch (l->x.f.flag) {
+      case FL_ON:
+      case '+':
+      case 0:
+        GlobalWMSidechannelFlags[0] |= bit;  /* OR */
+        GlobalWMSidechannelFlags[1] &= ~bit; /* XOR */
+        break;
+      case FL_OFF:
+      case '-':
+        GlobalWMSidechannelFlags[0] |= bit; /* OR */
+        GlobalWMSidechannelFlags[1] |= bit; /* XOR */
+        break;
+      case FL_TOGGLE:
+        GlobalWMSidechannelFlags[0] &= ~bit; /* OR */
+        GlobalWMSidechannelFlags[1] |= bit;  /* XOR */
+        break;
+      default:
+        return tfalse;
+      }
+      continue;
+    }
     switch (l->id) {
     case ALTFONT: /*ignored for compatibility*/
       return ttrue;
@@ -1094,6 +1126,9 @@ static void DumpGlobals(void) {
 static void ClearGlobals(void) {
   memset(Globals, '\0', GLOBAL_MAX * sizeof(node));
   memset(All->ButtonVec, '\0', BUTTON_MAX * sizeof(button_vec));
+  memset(GlobalFlags, '\0', sizeof(GlobalFlags));
+  memset(GlobalShadows, '\0', sizeof(GlobalShadows));
+  memset(GlobalWMSidechannelFlags, '\0', sizeof(GlobalWMSidechannelFlags));
   MenuBinds = NULL;
   MenuBindsMax = 0;
 }
@@ -1118,6 +1153,8 @@ static void WriteGlobals(void) {
   m += sizeof(GlobalFlags);
   CopyMem(GlobalShadows, m, sizeof(GlobalShadows));
   m += sizeof(GlobalShadows);
+  CopyMem(GlobalWMSidechannelFlags, m, sizeof(GlobalWMSidechannelFlags));
+  m += sizeof(GlobalWMSidechannelFlags);
 }
 
 static Tscreen FindNameInScreens(dat len, const char *name, Tscreen screen) {
@@ -1402,6 +1439,8 @@ static byte ReadGlobals(void) {
   m += sizeof(GlobalFlags);
   CopyMem(m, GlobalShadows, sizeof(GlobalShadows));
   m += sizeof(GlobalShadows);
+  CopyMem(m, GlobalWMSidechannelFlags, sizeof(GlobalWMSidechannelFlags));
+  m += sizeof(GlobalWMSidechannelFlags);
 
 #ifdef DEBUG_RC
   DumpGlobals();
@@ -1413,6 +1452,17 @@ static byte ReadGlobals(void) {
   All->SetUp->ButtonPaste = GlobalFlags[3];
   All->SetUp->DeltaXShade = GlobalShadows[0];
   All->SetUp->DeltaYShade = GlobalShadows[1];
+
+  /* Nemesis: same OR/XOR pattern, applied to the WM side-channel byte;
+   * defaults (0) match WMSockSetFlags() initial state. Re-applied on every
+   * RCReload so a twinrc edit followed by Restart re-converges. */
+  {
+    byte wmf = 0;
+    wmf |= (byte)GlobalWMSidechannelFlags[0];
+    wmf ^= (byte)GlobalWMSidechannelFlags[1];
+    WMSockSetFlags((wmf & wm_sidechannel_allow_offscreen) != 0,
+                   (wmf & wm_sidechannel_debug) != 0);
+  }
 
   shm_TSR();
 

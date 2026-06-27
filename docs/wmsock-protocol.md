@@ -1,9 +1,8 @@
 # Nemesis WM side-channel protocol
 
-**Status:** Phase 4D landed — inbound commands implemented and verified.
-Outbound events (Phases 4A–4C) are landed and unchanged.
-Phase 4E (twinrc integration for `wm_sidechannel_*` flags) and Phase 4F
-(outbound write queue) are planned.
+**Status:** Phases 4A–4F landed. Outbound events (4A–4C), inbound
+commands (4D), twinrc integration for `wm_sidechannel_*` flags (4E),
+and the outbound write queue (4F) are all in place.
 
 This document is the wire-level contract between `twin_server` and an
 external window manager attached to the WM side-channel socket. If
@@ -263,42 +262,54 @@ message after a command is the reply" — match by `id`.
 - There is no priority mechanism and no veto. Either peer is free to
   ignore the other.
 
-## 9. Backpressure (deferred to Phase 4F)
+## 9. Backpressure
 
-In Phase 4D there is **no separate command queue**. On a readable-fd
-event the server drains the kernel socket buffer into a per-connection
-line buffer (size `WMSOCK_READ_BUFSZ`), parses every complete line in
-it, and dispatches each command sequentially in the same main-loop
-tick before yielding back to the loop. Anything that does not fit
-backpressures naturally via the kernel — the external WM's `write()`
-begins to return `EAGAIN` (or block, if the WM is using a blocking
-socket).
+**Inbound (commands).** There is **no separate command queue**. On a
+readable-fd event the server drains the kernel socket buffer into a
+per-connection line buffer (size `WMSOCK_READ_BUFSZ`), parses every
+complete line in it, and dispatches each command sequentially in the
+same main-loop tick before yielding back to the loop. Anything that
+does not fit backpressures naturally via the kernel — the external
+WM's `write()` begins to return `EAGAIN` (or block, if the WM is using
+a blocking socket).
 
-The outbound write path is best-effort: an `EAGAIN` on the write
-drops the message (event or reply). A slow client can lose replies.
+**Outbound (events and replies)** — Phase 4F. The server uses the
+Twin `RemoteWriteQueue` / `RemoteFlush` pair on the WM connection
+slot. Every event and reply is queued, then `RemoteFlush()` drains as
+much as the kernel will accept. Anything left over stays queued; the
+fd is registered in `save_wfds`, and the main loop's
+`RemoteFlushAll()` retries on the next writable signal from
+`select()`. Slow consumers no longer lose events; the queue grows on
+demand.
 
-Phase 4F replaces the outbound side with a real write queue
-(`RemoteWriteQueue` / `RemoteFlush`). After 4F, replies and events are
-delivered reliably as long as the connection stays open.
-
-Until 4F lands, clients should treat ack timeouts as a soft signal,
-not a hard error: log, retry only if necessary, and rely on event
-correlation for ground truth.
+Disconnect semantics are unchanged: detection rides the read path
+(EOF / read error → `wmCloseConn`). When the slot is unregistered,
+any still-queued bytes are dropped — a peer that hard-closes
+forfeits whatever was buffered for it, by design.
 
 ## 10. Configuration
 
-Phase 4D introduces two twinrc flags that gate command semantics.
-Both default to the conservative setting so that an unconfigured
-server behaves predictably for any external WM author.
+Phase 4E wires the two command-semantics flags into twinrc. Both
+default to the conservative setting so that an unconfigured server
+behaves predictably for any external WM author.
 
-| Flag                              | Type | Default | Effect                                                         |
-|-----------------------------------|------|---------|----------------------------------------------------------------|
-| `wm_sidechannel_allow_offscreen`  | bool | `false` | When `false`, `cmd:move` clamps target `(x, y)` to keep the window's top-left inside the parent screen. When `true`, the server passes the request through unmodified — windows can move entirely offscreen, matching built-in WM behavior. |
-| `wm_sidechannel_debug`            | bool | `false` | When `true`, success replies for `cmd:move` and `cmd:resize` include the post-clamp geometry (see §6.2). External WM debug tools opt in; production stays minimal-latency. |
+| Flag                              | twinrc keyword                | Type | Default | Effect                                                         |
+|-----------------------------------|-------------------------------|------|---------|----------------------------------------------------------------|
+| `wm_sidechannel_allow_offscreen`  | `WmSidechannelAllowOffscreen` | bool | `false` | When `false`, `cmd:move` clamps target `(x, y)` to keep the window's top-left inside the parent screen. When `true`, the server passes the request through unmodified — windows can move entirely offscreen, matching built-in WM behavior. |
+| `wm_sidechannel_debug`            | `WmSidechannelDebug`          | bool | `false` | When `true`, success replies for `cmd:move` and `cmd:resize` include the post-clamp geometry (see §6.2). External WM debug tools opt in; production stays minimal-latency. |
 
-Both flags are read once at server start (no live reload in 4D). The
-exact twinrc syntax follows the conventions in the existing
-`twinrc` example file — to be finalized during implementation.
+Use them inside a `GlobalFlags` block, with the same `+` / `-` /
+`On` / `Off` / `Toggle` syntax as other twinrc flags:
+
+```
+GlobalFlags +WmSidechannelAllowOffscreen
+GlobalFlags -WmSidechannelDebug
+```
+
+Each `RCReload` (server start, plus `Restart` from a running session)
+re-runs the parser and re-invokes `WMSockSetFlags()` with the parsed
+values. State is not preserved across reloads — `Toggle` evaluates
+relative to the `false` baseline, not the previous live value.
 
 ## 11. Out of scope
 
@@ -314,8 +325,8 @@ Anticipated future work that is **not** part of 4D:
 - **Active unfocus** (`focus wid:0` or `cmd:unfocus`) — no
   use case in 4D; external WMs that need to clear focus should focus
   a different window. Add later if a real use case appears.
-- **Live config reload** — `wm_sidechannel_*` flags are read once at
-  server start.
+- **Per-WM config overrides** — `wm_sidechannel_*` flags are global;
+  every attached external WM sees the same gating semantics.
 
 ## 12. Decisions log
 
